@@ -315,7 +315,7 @@ bool Map::load(std::string filename)
         std::cout << "Invalid file" << std::endl;
         return false;
     }
-    if (header.version != 0x2E)
+    if (header.version != 0x2E && header.version != 0x2F)
     {
         std::cout << "File version not supported" << std::endl;
         return false;
