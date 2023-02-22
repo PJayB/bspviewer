@@ -4,6 +4,7 @@
 #include <iostream>
 #include <glm/gtc/matrix_transform.hpp>
 #include <physfs.h>
+#include <memory.h>
 #include "filestream.hpp"
 #include "bsp.hpp"
 
@@ -25,7 +26,13 @@ enum
     FACE,
     LIGHTMAP,
     LIGHTVOL,
-    VISDATA
+    VISDATA,
+    NUM_LUMPS_IBSP,
+
+    LIGHTARRAY = NUM_LUMPS_IBSP, // RBSP only
+    NUM_LUMPS_RBSP,
+
+    MAX_LUMPS = NUM_LUMPS_RBSP
 };
 
 const int CONTENTS_SOLID        = 0x1;
@@ -76,7 +83,10 @@ const int SURF_SURFDUST     = 0x40000;
 
 const void* VertexPosition = (void*)(long)offsetof(Vertex, position);
 const void* VertexTexCoord = (void*)(long)offsetof(Vertex, texCoord);
-const void* VertexLMCoord = (void*)(long)offsetof(Vertex, lmCoord);
+const void* VertexLMCoord0 = (void*)(long)offsetof(Vertex, lmCoord[0]);
+const void* VertexLMCoord1 = (void*)(long)offsetof(Vertex, lmCoord[1]);
+const void* VertexLMCoord2 = (void*)(long)offsetof(Vertex, lmCoord[2]);
+const void* VertexLMCoord3 = (void*)(long)offsetof(Vertex, lmCoord[3]);
 const void* VertexNormalCoord = (void*)(long)offsetof(Vertex, normal);
 
 struct Lump
@@ -89,7 +99,6 @@ struct Header
 {
     char magic[4];
     int version;
-    Lump lumps[17];
 };
 
 struct RawShader
@@ -99,7 +108,21 @@ struct RawShader
     int contents;
 };
 
-struct RawFace
+struct RawBrushSide_IBSP
+{
+    int plane;
+    int shader;
+};
+
+struct RawVertex_IBSP {
+    glm::vec3 position;
+    glm::vec2 texCoord;
+    glm::vec2 lmCoord;
+    glm::vec3 normal;
+    unsigned char colour[4];
+};
+
+struct RawFace_IBSP
 {
     int shader;
     int effect;
@@ -117,19 +140,113 @@ struct RawFace
     int size[2];
 };
 
-struct RawLightVol
+struct RawFace_RBSP
+{
+    int shader;
+    int effect;
+    int type;
+    int vertexOffset;
+    int vertexCount;
+    int meshVertexOffset;
+    int meshVertexCount;
+    unsigned char lightMapStyles[MaxLightMapCount];
+    unsigned char vertexStyles[MaxLightMapCount];
+    int lightMaps[MaxLightMapCount];
+    int lightMapStart[2][MaxLightMapCount];
+    int lightMapSize[2];
+    glm::vec3 lightMapOrigin;
+    glm::vec3 lightMapVecs[2];
+    glm::vec3 normal;
+    int size[2];
+};
+
+struct RawLightVol_IBSP
 {
     unsigned char ambient[3];
     unsigned char directional[3];
     unsigned char direction[2];
 };
 
+struct RawLightVol_RBSP
+{
+    unsigned char ambient[MaxLightMapCount][3];
+    unsigned char directional[MaxLightMapCount][3];
+    unsigned char styles[MaxLightMapCount];
+    unsigned char direction[2];
+};
+
+template<typename T> void copy_array(T& dst, const T& src)
+{
+    memcpy(dst, src, sizeof(src));
+}
+
+static BrushSide ibsp_to_rbsp(const RawBrushSide_IBSP& b)
+{
+    BrushSide a;
+    memset(&a, 0, sizeof(a));
+
+    a.plane = b.plane;
+    a.shader = b.shader;
+    a.drawSurf = -1;
+    return a;
+}
+
+static Vertex ibsp_to_rbsp(const RawVertex_IBSP& b)
+{
+    Vertex a;
+    memset(&a, 0, sizeof(a));
+
+    a.position = b.position;
+    a.texCoord = b.texCoord;
+    a.lmCoord[0] = b.lmCoord;
+    a.normal = b.normal;
+    return a;
+}
+
+static RawFace_RBSP ibsp_to_rbsp(const RawFace_IBSP& b)
+{
+    RawFace_RBSP a;
+    memset(&a, 0, sizeof(a));
+
+    a.shader = b.shader;
+    a.effect = b.effect;
+    a.type = b.type;
+    a.vertexOffset = b.vertexOffset;
+    a.vertexCount = b.vertexCount;
+    a.meshVertexOffset = b.meshVertexOffset;
+    a.meshVertexCount = b.meshVertexCount;
+    a.lightMaps[0] = b.lightMap;
+    for (int i = 1; i < MaxLightMapCount; ++i)
+        a.lightMaps[i] = -1;
+    a.lightMapStart[0][0] = b.lightMapStart[0];
+    a.lightMapStart[1][0] = b.lightMapStart[1];
+    copy_array(a.lightMapSize, b.lightMapSize);
+    a.lightMapOrigin = b.lightMapOrigin;
+    copy_array(a.lightMapVecs, b.lightMapVecs);
+    a.normal = b.normal;
+    copy_array(a.size, b.size);
+    return a;
+}
+
+static RawLightVol_RBSP ibsp_to_rbsp(const RawLightVol_IBSP& b)
+{
+    RawLightVol_RBSP a;
+    memset(&a, 0, sizeof(a));
+
+    copy_array(a.ambient[0], b.ambient);
+    copy_array(a.directional[0], b.directional);
+    copy_array(a.direction, b.direction);
+    return a;
+}
+
 Vertex operator+(const Vertex& v1, const Vertex& v2)
 {
     Vertex temp;
     temp.position = v1.position + v2.position;
     temp.texCoord = v1.texCoord + v2.texCoord;
-    temp.lmCoord = v1.lmCoord + v2.lmCoord;
+    for (int i = 0; i < MaxLightMapCount; ++i) {
+        temp.lmCoord[i] = v1.lmCoord[i] + v2.lmCoord[i];
+    }
     temp.normal = v1.normal + v2.normal;
     return temp;
 }
@@ -139,7 +256,9 @@ Vertex operator*(const Vertex& v1, const float& d)
     Vertex temp;
     temp.position = v1.position * d;
     temp.texCoord = v1.texCoord * d;
-    temp.lmCoord = v1.lmCoord * d;
+    for (int i = 0; i < MaxLightMapCount; ++i) {
+        temp.lmCoord[i] = v1.lmCoord[i] * d;
+    }
     temp.normal = v1.normal * d;
     return temp;
 }
@@ -271,7 +390,10 @@ Map::Map()
     glBindAttribLocation(program, 0, "vertex");
     //glBindAttribLocation(program, 1, "normal");
     glBindAttribLocation(program, 2, "texcoord");
-    glBindAttribLocation(program, 3, "lmcoord");
+    glBindAttribLocation(program, 3, "lmcoord1");
+    glBindAttribLocation(program, 4, "lmcoord2");
+    glBindAttribLocation(program, 5, "lmcoord3");
+    glBindAttribLocation(program, 6, "lmcoord4");
 
     glLinkProgram(program);
 
@@ -293,7 +415,11 @@ Map::Map()
 
     programLoc["matrix"] = glGetUniformLocation(program, "matrix");
     programLoc["texture"] = glGetUniformLocation(program, "texture");
-    programLoc["lightmap"] = glGetUniformLocation(program, "lightmap");
+    programLoc["lightmap1"] = glGetUniformLocation(program, "lightmap1");
+    programLoc["lightmap2"] = glGetUniformLocation(program, "lightmap2");
+    programLoc["lightmap3"] = glGetUniformLocation(program, "lightmap3");
+    programLoc["lightmap4"] = glGetUniformLocation(program, "lightmap4");
+    programLoc["lightmapGamma"] = glGetUniformLocation(program, "lightmapGamma");
 }
 
 bool Map::load(std::string filename)
@@ -310,24 +436,52 @@ bool Map::load(std::string filename)
     PHYSFS_seek(file, 0);
     Header header;
     PHYSFS_read(file, &header, sizeof(Header), 1);
-    if (std::string(header.magic, 4) != "IBSP")
+    if (std::string(header.magic, 4) == "IBSP")
+    {
+        // 46 - Quake 3
+        // 47 - RTCW
+        if (header.version != 0x2E && header.version != 0x2F)
+        {
+            std::cout << "IBSP version " << header.version << " not supported" << std::endl;
+            return false;
+        }
+        isRBSP = false;
+        maxLightMapCount = 1;
+        lightMapGamma = 3.0f;
+    }
+    else if (std::string(header.magic, 4) == "RBSP")
+    {
+        if (header.version != 1)
+        {
+            std::cout << "RBSP version " << header.version << " not supported" << std::endl;
+            return false;
+        }
+        isRBSP = true;
+        // lightMapGamma = 1.0f;
+        lightMapGamma = 3.0f;
+
+        int maxSupportedTextures = 1;
+        glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxSupportedTextures);
+        maxLightMapCount = std::min<unsigned int>(MaxLightMapCount, maxSupportedTextures);
+    }
+    else
     {
         std::cout << "Invalid file" << std::endl;
         return false;
     }
-    if (header.version != 0x2E && header.version != 0x2F)
-    {
-        std::cout << "File version not supported" << std::endl;
-        return false;
-    }
 
-    PHYSFS_seek(file, header.lumps[ENTITY].offset);
+    // Read the lumps
+    int numLumps = isRBSP ? NUM_LUMPS_RBSP : NUM_LUMPS_IBSP;
+    Lump lumps[MAX_LUMPS];
+    PHYSFS_read(file, lumps, sizeof(Lump), numLumps);
+
+    PHYSFS_seek(file, lumps[ENTITY].offset);
     std::string rawEntity;
-    rawEntity.resize(header.lumps[ENTITY].size);
-    PHYSFS_read(file, &rawEntity[0], 1, header.lumps[ENTITY].size);
+    rawEntity.resize(lumps[ENTITY].size);
+    PHYSFS_read(file, &rawEntity[0], 1, lumps[ENTITY].size);
 
-    int shaderCount = header.lumps[SHADER].size / sizeof(RawShader);
-    PHYSFS_seek(file, header.lumps[SHADER].offset);
+    int shaderCount = lumps[SHADER].size / sizeof(RawShader);
+    PHYSFS_seek(file, lumps[SHADER].offset);
     shaderArray.reserve(shaderCount);
     for (int i = 0; i < shaderCount; i++)
     {
@@ -374,6 +528,13 @@ bool Map::load(std::string filename)
                 }
                 else
                 {
+                    // load an error texture
+                    {
+                        sf::Image image;
+                        image.create(1, 1, sf::Color(255, 0, 255));
+                        shader.texture.loadFromImage(image);
+                        shader.render = true;
+                    }
                     std::cout << shader.name << ": Texture not found" << std::endl;
                 }
             }
@@ -381,62 +542,87 @@ bool Map::load(std::string filename)
         shaderArray.push_back(shader);
     }
 
-    int planeCount = header.lumps[PLANE].size / sizeof(Plane);
-    PHYSFS_seek(file, header.lumps[PLANE].offset);
+    int planeCount = lumps[PLANE].size / sizeof(Plane);
+    PHYSFS_seek(file, lumps[PLANE].offset);
+    assert(planeCount * sizeof(Plane) == lumps[PLANE].size);
     planeArray.resize(planeCount);
     if (planeCount > 0)
         PHYSFS_read(file, &planeArray[0], sizeof(Plane), planeCount);
 
-    int nodeCount = header.lumps[NODE].size / sizeof(Node);
-    PHYSFS_seek(file, header.lumps[NODE].offset);
+    int nodeCount = lumps[NODE].size / sizeof(Node);
+    assert(nodeCount * sizeof(Node) == lumps[NODE].size);
+    PHYSFS_seek(file, lumps[NODE].offset);
     nodeArray.resize(nodeCount);
     if (nodeCount > 0)
         PHYSFS_read(file, &nodeArray[0], sizeof(Node), nodeCount);
 
-    int leafCount = header.lumps[LEAF].size / sizeof(Leaf);
-    PHYSFS_seek(file, header.lumps[LEAF].offset);
+    int leafCount = lumps[LEAF].size / sizeof(Leaf);
+    assert(leafCount * sizeof(Leaf) == lumps[LEAF].size);
+    PHYSFS_seek(file, lumps[LEAF].offset);
     leafArray.resize(leafCount);
     if (leafCount > 0)
         PHYSFS_read(file, &leafArray[0], sizeof(Leaf), leafCount);
 
-    int leafFaceCount = header.lumps[LEAFFACE].size / sizeof(int);
-    PHYSFS_seek(file, header.lumps[LEAFFACE].offset);
+    int leafFaceCount = lumps[LEAFFACE].size / sizeof(int);
+    assert(leafFaceCount * sizeof(int) == lumps[LEAFFACE].size);
+    PHYSFS_seek(file, lumps[LEAFFACE].offset);
     leafFaceArray.resize(leafFaceCount);
     if (leafFaceCount > 0)
         PHYSFS_read(file, &leafFaceArray[0], sizeof(int), leafFaceCount);
 
-    int leafBrushCount = header.lumps[LEAFBRUSH].size / sizeof(int);
-    PHYSFS_seek(file, header.lumps[LEAFBRUSH].offset);
+    int leafBrushCount = lumps[LEAFBRUSH].size / sizeof(int);
+    assert(leafBrushCount * sizeof(int) == lumps[LEAFBRUSH].size);
+    PHYSFS_seek(file, lumps[LEAFBRUSH].offset);
     leafBrushArray.resize(leafBrushCount);
     if (leafBrushCount > 0)
         PHYSFS_read(file, &leafBrushArray[0], sizeof(int), leafBrushCount);
 
-    int modelCount = header.lumps[MODEL].size / sizeof(Model);
-    PHYSFS_seek(file, header.lumps[MODEL].offset);
+    int modelCount = lumps[MODEL].size / sizeof(Model);
+    assert(modelCount * sizeof(Model) == lumps[MODEL].size);
+    PHYSFS_seek(file, lumps[MODEL].offset);
     modelArray.resize(modelCount);
     if (modelCount > 0)
         PHYSFS_read(file, &modelArray[0], sizeof(Model), modelCount);
 
-    int brushCount = header.lumps[BRUSH].size / sizeof(Brush);
-    PHYSFS_seek(file, header.lumps[BRUSH].offset);
+    int brushCount = lumps[BRUSH].size / sizeof(Brush);
+    assert(brushCount * sizeof(Brush) == lumps[BRUSH].size);
+    PHYSFS_seek(file, lumps[BRUSH].offset);
     brushArray.resize(brushCount);
     if (brushCount > 0)
         PHYSFS_read(file, &brushArray[0], sizeof(Brush), brushCount);
 
-    int brushSideCount = header.lumps[BRUSHSIDE].size / sizeof(BrushSide);
-    PHYSFS_seek(file, header.lumps[BRUSHSIDE].offset);
-    brushSideArray.resize(brushSideCount);
-    if (brushSideCount > 0)
-        PHYSFS_read(file, &brushSideArray[0], sizeof(BrushSide), brushSideCount);
+    PHYSFS_seek(file, lumps[BRUSHSIDE].offset);
+    if (isRBSP) {
+        int brushSideCount = lumps[BRUSHSIDE].size / sizeof(BrushSide);
+        assert(brushSideCount * sizeof(BrushSide) == lumps[BRUSHSIDE].size);
+        brushSideArray.resize(brushSideCount);
+        if (brushSideCount > 0)
+            PHYSFS_read(file, &brushSideArray[0], sizeof(BrushSide), brushSideCount);
+    } else {
+        int brushSideCount = lumps[BRUSHSIDE].size / sizeof(RawBrushSide_IBSP);
+        assert(brushSideCount * sizeof(RawBrushSide_IBSP) == lumps[BRUSHSIDE].size);
+        brushSideArray.resize(brushSideCount);
+        if (brushSideCount > 0)
+        {
+            std::vector<RawBrushSide_IBSP> rawBrushSideArray(brushSideCount);
+            PHYSFS_read(file, &rawBrushSideArray[0], sizeof(RawBrushSide_IBSP), brushSideCount);
+            for (int i = 0; i < brushSideCount; ++i) {
+                brushSideArray[i] = ibsp_to_rbsp(rawBrushSideArray[i]);
+            }
+        }
+    }
 
-    int effectCount = header.lumps[EFFECT].size / sizeof(Effect);
-    PHYSFS_seek(file, header.lumps[EFFECT].offset);
+    int effectCount = lumps[EFFECT].size / sizeof(Effect);
+    assert(effectCount * sizeof(Effect) == lumps[EFFECT].size);
+    PHYSFS_seek(file, lumps[EFFECT].offset);
     effectArray.resize(effectCount);
     if (effectCount > 0)
         PHYSFS_read(file, &effectArray[0], sizeof(Effect), effectCount);
 
-    int lightMapCount = header.lumps[LIGHTMAP].size / (128 * 128 * 3);
-    PHYSFS_seek(file, header.lumps[LIGHTMAP].offset);
+    constexpr int lightMapSize = (128 * 128 * 3);
+    int lightMapCount = lumps[LIGHTMAP].size / lightMapSize;
+    assert(lightMapCount * lightMapSize == lumps[LIGHTMAP].size);
+    PHYSFS_seek(file, lumps[LIGHTMAP].offset);
     lightMapArray.resize(lightMapCount + 1);
     for (int i = 0; i < lightMapCount; i++)
     {
@@ -458,17 +644,45 @@ bool Map::load(std::string filename)
         image.create(1, 1, sf::Color(85, 85, 85));
         lightMapArray[lightMapCount].loadFromImage(image);
     }
+    {
+        sf::Image image;
+        image.create(1, 1, sf::Color(0, 0, 0));
+        lightMapArray[lightMapCount].loadFromImage(image);
+    }
 
-    int faceCount = header.lumps[FACE].size / sizeof(RawFace);
+    int defaultLightMap = lightMapCount;
+    int defaultDarkMap = lightMapCount + 1;
+
+    int faceCount;
+    std::vector<RawFace_RBSP> rawRbspFaces;
+    PHYSFS_seek(file, lumps[FACE].offset);
+    if (isRBSP) {
+        faceCount = lumps[FACE].size / sizeof(RawFace_RBSP);
+        assert(faceCount * sizeof(RawFace_RBSP) == lumps[FACE].size);
+        rawRbspFaces.resize(faceCount);
+        if (faceCount > 0) {
+            PHYSFS_read(file, &rawRbspFaces[0], sizeof(RawFace_RBSP), faceCount);
+        }
+    } else {
+        faceCount = lumps[FACE].size / sizeof(RawFace_IBSP);
+        assert(faceCount * sizeof(RawFace_IBSP) == lumps[FACE].size);
+        rawRbspFaces.resize(faceCount);
+        if (faceCount > 0) {
+            std::vector<RawFace_IBSP> rawIbspFaces(faceCount);
+            PHYSFS_read(file, &rawIbspFaces[0], sizeof(RawFace_IBSP), faceCount);
+            for (int i = 0; i < faceCount; ++i) {
+                rawRbspFaces[i] = ibsp_to_rbsp(rawIbspFaces[i]);
+            }
+        }
+    }
+
     int bezierCount = 0;
     int bezierPatchSize = (bezierLevel + 1) * (bezierLevel + 1);
     int bezierIndexSize = bezierLevel * bezierLevel * 6;
-    PHYSFS_seek(file, header.lumps[FACE].offset);
-    faceArray.resize(faceCount);
+    faceArray.resize(rawRbspFaces.size());
     for (int i = 0; i < faceCount; i++)
     {
-        RawFace rawFace;
-        PHYSFS_read(file, &rawFace, sizeof(RawFace), 1);
+        const RawFace_RBSP& rawFace = rawRbspFaces[i];
         Face &face = faceArray[i];
         face.shader = rawFace.shader;
         face.effect = rawFace.effect;
@@ -476,9 +690,11 @@ bool Map::load(std::string filename)
         face.vertexCount = rawFace.vertexCount;
         face.meshIndexOffset = rawFace.meshVertexOffset;
         face.meshIndexCount = rawFace.meshVertexCount;
-        face.lightMap = rawFace.lightMap;
-        if (rawFace.lightMap < 0)
-            face.lightMap = lightMapCount;
+        copy_array(face.lightMaps, rawFace.lightMaps);
+        for (int i = 0; i < MaxLightMapCount; ++i) {
+            if (rawFace.lightMaps[i] < 0)
+                face.lightMaps[i] = i == 0 ? defaultLightMap : defaultDarkMap;
+        }
         switch (rawFace.type)
         {
         case 1:
@@ -506,18 +722,35 @@ bool Map::load(std::string filename)
         }
     }
 
-    int meshVertexCount = header.lumps[MESHVERTEX].size / sizeof(GLuint);
-    PHYSFS_seek(file, header.lumps[MESHVERTEX].offset);
+    int meshVertexCount = lumps[MESHVERTEX].size / sizeof(GLuint);
+    assert(meshVertexCount * sizeof(GLuint) == lumps[MESHVERTEX].size);
+    PHYSFS_seek(file, lumps[MESHVERTEX].offset);
     meshIndexArray.resize(meshVertexCount + bezierIndexSize * bezierCount);
     if (meshVertexCount > 0)
         PHYSFS_read(file, &meshIndexArray[0], sizeof(GLuint), meshVertexCount);
 
-    int vertexCount = header.lumps[VERTEX].size / sizeof(Vertex);
-    PHYSFS_seek(file, header.lumps[VERTEX].offset);
-    vertexArray.resize(vertexCount + bezierCount * bezierPatchSize);
-    if (vertexCount > 0)
-        PHYSFS_read(file, &vertexArray[0], sizeof(Vertex), vertexCount);
+    int vertexCount;
+    PHYSFS_seek(file, lumps[VERTEX].offset);
+    if (isRBSP) {
+        vertexCount = lumps[VERTEX].size / sizeof(Vertex);
+        assert(vertexCount * sizeof(Vertex) == lumps[VERTEX].size);
+        vertexArray.resize(vertexCount);
+        if (vertexCount > 0)
+            PHYSFS_read(file, &vertexArray[0], sizeof(Vertex), vertexCount);
+    } else {
+        vertexCount = lumps[VERTEX].size / sizeof(RawVertex_IBSP);
+        assert(vertexCount * sizeof(RawVertex_IBSP) == lumps[VERTEX].size);
+        vertexArray.resize(vertexCount);
+        if (vertexCount > 0) {
+            std::vector<RawVertex_IBSP> rawVertexArray(vertexCount);
+            PHYSFS_read(file, &rawVertexArray[0], sizeof(RawVertex_IBSP), vertexCount);
+            for (int i = 0; i < vertexCount; ++i) {
+                vertexArray[i] = ibsp_to_rbsp(rawVertexArray[i]);
+            }
+        }
+    }
 
+    vertexArray.resize(vertexCount + bezierCount * bezierPatchSize);
     for (int i = 0, vOffset = vertexCount, iOffset = meshVertexCount; i < faceCount; i++)
     {
         Face &face = faceArray[i];
@@ -556,24 +789,46 @@ bool Map::load(std::string filename)
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, meshIndexArray.size() * sizeof(GLuint), &meshIndexArray[0], GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
-    int lightVolCount = header.lumps[LIGHTVOL].size / sizeof(RawLightVol);
-    PHYSFS_seek(file, header.lumps[LIGHTVOL].offset);
+    int lightVolCount;
+    PHYSFS_seek(file, lumps[LIGHTVOL].offset);
+    std::vector<RawLightVol_RBSP> rawRbspLightVolArray;
+    if (isRBSP) {
+        lightVolCount = lumps[LIGHTVOL].size / sizeof(RawLightVol_RBSP);
+        assert(lightVolCount * sizeof(RawLightVol_RBSP) == lumps[LIGHTVOL].size);
+        rawRbspLightVolArray.resize(lightVolCount);
+        if (lightVolCount > 0) {
+            PHYSFS_read(file, &rawRbspLightVolArray[0], sizeof(RawLightVol_RBSP), lightVolCount);
+        }
+    } else {
+        lightVolCount = lumps[LIGHTVOL].size / sizeof(RawLightVol_IBSP);
+        assert(lightVolCount * sizeof(RawLightVol_IBSP) == lumps[LIGHTVOL].size);
+        rawRbspLightVolArray.resize(lightVolCount);
+        if (lightVolCount > 0) {
+            std::vector<RawLightVol_IBSP> rawIbspLightVolArray(lightVolCount);
+            PHYSFS_read(file, &rawIbspLightVolArray[0], sizeof(RawLightVol_IBSP), lightVolCount);
+            for (int i = 0; i < lightVolCount; ++i) {
+                rawRbspLightVolArray[i] = ibsp_to_rbsp(rawIbspLightVolArray[i]);
+            }
+        }
+    }
+
     lightVolArray.reserve(lightVolCount);
     for (int i = 0; i < lightVolCount; i++)
     {
-        RawLightVol rawLightVol;
-        PHYSFS_read(file, &rawLightVol, sizeof(RawLightVol), 1);
+        const auto& rawLightVol = rawRbspLightVolArray[i];
         LightVol lightVol;
 
-        lightVol.ambient.x = rawLightVol.ambient[0];
-        lightVol.ambient.y = rawLightVol.ambient[1];
-        lightVol.ambient.z = rawLightVol.ambient[2];
-        lightVol.ambient = lightVol.ambient / 256.f;
+        for (int lmIndex = 0; lmIndex < MaxLightMapCount; ++lmIndex) {
+            lightVol.ambient[lmIndex].x = rawLightVol.ambient[lmIndex][0];
+            lightVol.ambient[lmIndex].y = rawLightVol.ambient[lmIndex][1];
+            lightVol.ambient[lmIndex].z = rawLightVol.ambient[lmIndex][2];
+            lightVol.ambient[lmIndex] = lightVol.ambient[lmIndex] / 256.f;
 
-        lightVol.directional.x = rawLightVol.directional[0];
-        lightVol.directional.y = rawLightVol.directional[1];
-        lightVol.directional.z = rawLightVol.directional[2];
-        lightVol.directional = lightVol.directional / 256.f;
+            lightVol.directional[lmIndex].x = rawLightVol.directional[lmIndex][0];
+            lightVol.directional[lmIndex].y = rawLightVol.directional[lmIndex][1];
+            lightVol.directional[lmIndex].z = rawLightVol.directional[lmIndex][2];
+            lightVol.directional[lmIndex] = lightVol.directional[lmIndex] / 256.f;
+        }
 
         float phi = (int(rawLightVol.direction[0]) - 128) / 256.f * 180;
         float thetha = int(rawLightVol.direction[1]) / 256.f * 360;
@@ -586,12 +841,13 @@ bool Map::load(std::string filename)
         lightVolArray.push_back(lightVol);
     }
 
-    PHYSFS_seek(file, header.lumps[VISDATA].offset);
-    if (header.lumps[VISDATA].size > 0)
+    PHYSFS_seek(file, lumps[VISDATA].offset);
+    if (lumps[VISDATA].size > 0)
     {
         PHYSFS_read(file, &visData.clusterCount, sizeof(int), 1);
         PHYSFS_read(file, &visData.bytesPerCluster, sizeof(int), 1);
         unsigned int size = visData.clusterCount * visData.bytesPerCluster;
+
         std::vector<char> rawVisData(size);
         PHYSFS_read(file, &rawVisData[0], size, 1);
 
@@ -605,6 +861,13 @@ bool Map::load(std::string filename)
                     visData.data[byteIndex * 8 + bit] = true;
             }
         }
+    }
+
+    if (isRBSP) {
+        PHYSFS_seek(file, lumps[LIGHTARRAY].offset);
+        int lightGridCount = lumps[LIGHTARRAY].size / sizeof(unsigned short);
+        assert(lightGridCount * sizeof(unsigned short) == lumps[LIGHTARRAY].size);
+        // todo: LIGHTARRAY lump
     }
 
     PHYSFS_close(file);
@@ -672,9 +935,12 @@ void Map::renderFace(int index, RenderPass& pass, bool solid)
 
     glActiveTexture(GL_TEXTURE0);
     sf::Texture::bind(&shaderArray[face.shader].texture);
-    glActiveTexture(GL_TEXTURE1);
-    sf::Texture::bind(&lightMapArray[face.lightMap]);
 
+    for (int i = 0; i < maxLightMapCount; ++i) {
+        glActiveTexture(GL_TEXTURE1 + i);
+        sf::Texture::bind(&lightMapArray[face.lightMaps[i]]);
+    }
+    
     glDrawElements(GL_TRIANGLES, face.meshIndexCount, GL_UNSIGNED_INT, (void*)(long)(face.meshIndexOffset * sizeof(GLuint)));
 
     pass.renderedFaces[index] = true;
@@ -733,13 +999,23 @@ void Map::renderWorld(glm::mat4 matrix, glm::vec3 pos)
     //glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
     glEnableVertexAttribArray(3);
+    glEnableVertexAttribArray(4);
+    glEnableVertexAttribArray(5);
+    glEnableVertexAttribArray(6);
     glUniformMatrix4fv(programLoc["matrix"], 1, GL_FALSE, &matrix[0][0]);
     glUniform1i(programLoc["texture"], 0);
-    glUniform1i(programLoc["lightmap"], 1);
+    glUniform1i(programLoc["lightmap1"], 1);
+    glUniform1i(programLoc["lightmap2"], 2);
+    glUniform1i(programLoc["lightmap3"], 3);
+    glUniform1i(programLoc["lightmap4"], 4);
+    glUniform1f(programLoc["lightmapGamma"], lightMapGamma);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexPosition);
     //glVertexAttribPointer(1, 3, GL_FLOAT, GL_TRUE,  sizeof(Vertex), VertexNormal);
     glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexTexCoord);
-    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexLMCoord);
+    glVertexAttribPointer(3, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexLMCoord0);
+    glVertexAttribPointer(4, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexLMCoord1);
+    glVertexAttribPointer(5, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexLMCoord2);
+    glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), VertexLMCoord3);
 
     RenderPass pass(this, pos, matrix);
     pass.cluster = leafArray[findLeaf(pos)].cluster;

@@ -11,6 +11,9 @@
 
 class Map;
 
+// RBSP lightmap count
+constexpr unsigned int MaxLightMapCount = 4;
+
 struct Plane {
     glm::vec3 normal;
     float distance;
@@ -52,14 +55,15 @@ struct Brush {
 struct BrushSide {
     int plane;
     int shader;
+    int drawSurf;
 };
 
 struct Vertex {
     glm::vec3 position;
     glm::vec2 texCoord;
-    glm::vec2 lmCoord;
+    glm::vec2 lmCoord[MaxLightMapCount];
     glm::vec3 normal;
-    unsigned char colour[4];
+    unsigned char colour[MaxLightMapCount][4];
 };
 
 struct Effect {
@@ -84,13 +88,14 @@ struct Face {
     int vertexCount;
     int meshIndexOffset;
     int meshIndexCount;
-    int lightMap;
+    int lightMaps[MaxLightMapCount];
     int bezierSize[2];
 };
 
 struct LightVol {
-    glm::vec3 ambient;
-    glm::vec3 directional;
+    glm::vec3 ambient[MaxLightMapCount];
+    glm::vec3 directional[MaxLightMapCount];
+    unsigned char styles[MaxLightMapCount]; // todo: find definition of what this does
     glm::vec3 direction;
 };
 
@@ -137,6 +142,7 @@ protected:
     std::map<std::string, GLuint> programLoc;
     VisData visData;
     int bezierLevel;
+    bool isRBSP;
 
     std::vector<Plane> planeArray;
     std::vector<Node> nodeArray;
@@ -157,6 +163,8 @@ protected:
     unsigned int lightVolSizeX;
     unsigned int lightVolSizeY;
     unsigned int lightVolSizeZ;
+    unsigned int maxLightMapCount;
+    float lightMapGamma;
 
     void tesselate(int controlOffset, int controlWidth, int vOffset, int iOffset);
 

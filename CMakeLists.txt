@@ -31,6 +31,10 @@ target_compile_features(bspviewer PUBLIC
 	cxx_raw_string_literals
 	cxx_defaulted_move_initializers
 )
+
+# todo: remove me
+target_compile_options(bspviewer PRIVATE "-Wno-deprecated-declarations")
+
 target_compile_definitions(bspviewer PUBLIC
 	GLM_FORCE_CXX11
 	GLM_FORCE_SWIZZLE
