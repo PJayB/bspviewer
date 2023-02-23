@@ -81,6 +81,11 @@ const int SURF_ALPHASHADOW  = 0x10000;
 const int SURF_NODLIGHT     = 0x20000;
 const int SURF_SURFDUST     = 0x40000;
 
+#define LIGHTMAP_2D			-4		// shader is for 2D rendering
+#define LIGHTMAP_BY_VERTEX	-3		// pre-lit triangle models
+#define LIGHTMAP_WHITEIMAGE	-2
+#define	LIGHTMAP_NONE		-1
+
 const void* VertexPosition = (void*)(long)offsetof(Vertex, position);
 const void* VertexTexCoord = (void*)(long)offsetof(Vertex, texCoord);
 const void* VertexLMCoord0 = (void*)(long)offsetof(Vertex, lmCoord[0]);
@@ -217,7 +222,7 @@ static RawFace_RBSP ibsp_to_rbsp(const RawFace_IBSP& b)
     a.meshVertexCount = b.meshVertexCount;
     a.lightMaps[0] = b.lightMap;
     for (int i = 1; i < MaxLightMapCount; ++i)
-        a.lightMaps[i] = -1;
+        a.lightMaps[i] = LIGHTMAP_NONE;
     a.lightMapStart[0][0] = b.lightMapStart[0];
     a.lightMapStart[1][0] = b.lightMapStart[1];
     copy_array(a.lightMapSize, b.lightMapSize);
@@ -457,9 +462,8 @@ bool Map::load(std::string filename)
             return false;
         }
         isRBSP = true;
-        // lightMapGamma = 1.0f;
         lightMapGamma = 3.0f;
-
+        
         int maxSupportedTextures = 1;
         glGetIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxSupportedTextures);
         maxLightMapCount = std::min<unsigned int>(MaxLightMapCount, maxSupportedTextures);
@@ -622,7 +626,7 @@ bool Map::load(std::string filename)
     int lightMapCount = lumps[LIGHTMAP].size / lightMapSize;
     assert(lightMapCount * lightMapSize == lumps[LIGHTMAP].size);
     PHYSFS_seek(file, lumps[LIGHTMAP].offset);
-    lightMapArray.resize(lightMapCount + 2);
+    lightMapArray.resize(lightMapCount + 3);
     for (int i = 0; i < lightMapCount; i++)
     {
         std::array<sf::Uint8, 128 * 128 * 4> rawLightMap;
@@ -648,9 +652,15 @@ bool Map::load(std::string filename)
         image.create(1, 1, sf::Color(0, 0, 0));
         lightMapArray[lightMapCount+1].loadFromImage(image);
     }
+    {
+        sf::Image image;
+        image.create(1, 1, sf::Color(255,255,255));
+        lightMapArray[lightMapCount+1].loadFromImage(image);
+    }
 
     int defaultLightMap = lightMapCount;
     int defaultDarkMap = lightMapCount + 1;
+    int defaultWhiteMap = lightMapCount + 2;
 
     int faceCount;
     std::vector<RawFace_RBSP> rawRbspFaces;
@@ -691,8 +701,25 @@ bool Map::load(std::string filename)
         face.meshIndexCount = rawFace.meshVertexCount;
         copy_array(face.lightMaps, rawFace.lightMaps);
         for (int i = 0; i < MaxLightMapCount; ++i) {
-            if (rawFace.lightMaps[i] < 0)
-                face.lightMaps[i] = i == 0 ? defaultLightMap : defaultDarkMap;
+            int lmIndex = rawFace.lightMaps[i];
+            switch (rawFace.lightMaps[i]) {
+            case LIGHTMAP_NONE:
+                face.lightMaps[i] = defaultDarkMap;
+                break;
+            case LIGHTMAP_WHITEIMAGE:
+                face.lightMaps[i] = defaultWhiteMap;
+                break;
+            case LIGHTMAP_BY_VERTEX:
+                // todo: implement someday
+                face.lightMaps[i] = defaultLightMap;
+                break;
+            default:
+                if (lmIndex < 0) {
+                    face.lightMaps[i] = defaultDarkMap;
+                } else {
+                    face.lightMaps[i] = lmIndex;
+                }
+            }
         }
         switch (rawFace.type)
         {
