@@ -511,30 +511,29 @@ bool Map::load(std::string filename)
             {
                 shader.name += ".tga";
             }
-            if ((rawshader.surface & 0x80) == 0)
+            if ((rawshader.surface & SURF_NODRAW) == 0)
             {
+                bool texOK = false;
                 FileStream filestream(shader.name);
                 if (filestream.isOpen())
                 {
                     if (shader.texture.loadFromStream(filestream))
                     {
-                        shader.render = true;
 #if SFML_VERSION_MAJOR > 2 || (SFML_VERSION_MAJOR == 2 && SFML_VERSION_MINOR >= 4)
                         shader.texture.generateMipmap();
 #endif
                         shader.texture.setRepeated(true);
                         shader.texture.setSmooth(true);
+                        texOK = true;
                     }
                 }
-                else
+                if (!texOK)
                 {
-                    // load an error texture
-                    {
-                        sf::Image image;
-                        image.create(1, 1, sf::Color(255, 0, 255));
-                        shader.texture.loadFromImage(image);
-                        shader.render = true;
-                    }
+                    // set an error texture
+                    sf::Image image;
+                    image.create(1, 1, sf::Color(255, 0, 255));
+                    shader.texture.loadFromImage(image);
+
                     std::cout << shader.name << ": Texture not found" << std::endl;
                 }
             }
@@ -623,7 +622,7 @@ bool Map::load(std::string filename)
     int lightMapCount = lumps[LIGHTMAP].size / lightMapSize;
     assert(lightMapCount * lightMapSize == lumps[LIGHTMAP].size);
     PHYSFS_seek(file, lumps[LIGHTMAP].offset);
-    lightMapArray.resize(lightMapCount + 1);
+    lightMapArray.resize(lightMapCount + 2);
     for (int i = 0; i < lightMapCount; i++)
     {
         std::array<sf::Uint8, 128 * 128 * 4> rawLightMap;
@@ -647,7 +646,7 @@ bool Map::load(std::string filename)
     {
         sf::Image image;
         image.create(1, 1, sf::Color(0, 0, 0));
-        lightMapArray[lightMapCount].loadFromImage(image);
+        lightMapArray[lightMapCount+1].loadFromImage(image);
     }
 
     int defaultLightMap = lightMapCount;

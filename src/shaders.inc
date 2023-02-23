@@ -37,10 +37,10 @@ uniform float lightmapGamma;
 // todo: really should be separate shaders for perf
 void main() {
 	vec4 texel = texture2D(texture, gl_TexCoord[0].st);
-	vec4 lm = texture2D(lightmap1, gl_TexCoord[1].st); // todo fixme
-			/* + texture2D(lightmap2, gl_TexCoord[2].st)
+	vec4 lm = texture2D(lightmap1, gl_TexCoord[1].st)
+			+ texture2D(lightmap2, gl_TexCoord[2].st)
 			+ texture2D(lightmap3, gl_TexCoord[3].st)
-			+ texture2D(lightmap4, gl_TexCoord[4].st); */
+			+ texture2D(lightmap4, gl_TexCoord[4].st);
 	texel = texel * lm * lightmapGamma;
 	gl_FragColor = texel;
 }
